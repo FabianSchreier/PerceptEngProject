@@ -1,0 +1,73 @@
+
+# NuGet folders #
+#################
+# Ignore NuGet Packages
+*.nupkg
+# Ignore the packages folder
+**/packages/*
+# except build/, which is used as an MSBuild target.
+!**/packages/build/
+# Uncomment if necessary however generally it will be regenerated when needed
+#!**/packages/repositories.config
+
+# Compiled source #
+###################
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Cache files #
+###############
+*.pyc
+
+
+# Packages #
+############
+# it's better to unpack these files and commit the raw source
+# git has its own built in compression methods
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Logs and databases #
+######################
+logs
+*.log
+# *.sql
+*.sqlite
+*.sqlite3
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Compile output folders #
+##########################
+/_Deploy
+obj
+bin
+out
+build
+
+
+# IDE & build user files #
+##########################
+.gradle
+*.user
+/.vs
+*.iml
+/.idea
