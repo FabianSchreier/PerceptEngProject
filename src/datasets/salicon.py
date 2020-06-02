@@ -67,12 +67,13 @@ def load_data(randomize: bool = True, datasets_root: str = None) -> Iterable[Inp
 
         name = fix_data['image'][0]
         image = np.asarray(img_data)
-        scanpaths = list(swap_columns(np.squeeze(fix_data['gaze']['fixations'])))
+        scanpaths = [(str(obs_i), swap_columns(sp)) for obs_i, sp in enumerate(np.squeeze(fix_data['gaze']['fixations']))]
 
         yield InputData(
             name=name,
             image_data=image,
-            scanpaths=scanpaths
+            scanpaths=scanpaths,
+            gt_scanpaths=[]
         )
 
 

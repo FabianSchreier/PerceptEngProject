@@ -6,6 +6,7 @@ __version__ = "0.1.0"
 __status__ = "Prototype"
 
 import argparse
+import importlib
 import os
 import shutil
 import time
@@ -17,12 +18,12 @@ import datasets
 
 import datasets.cat2000 as cat2000
 import datasets.salicon as salicon
+import datasets.salicon as mit1003
 import h5py
 import numpy as np
 from PIL import Image
-from data_augment import adjust_size, to_grayscale, generate_single_fixation_heatmap, \
-    merge_close_fixations, generate_scanpath_heatmap, convert_to_bytes
-
+from data_augment import adjust_size, to_grayscale, generate_single_fixation_heatmap, generate_scanpath_heatmap, \
+    convert_to_bytes, augment_entry, generate_scanpath_heatmap_inplace, generate_single_fixation_heatmap_inplace
 
 '''
 def visualize_heatmap(heatmap: NDArray[(Any, Any, 1), np.float], markers: NDArray[(Any, 2), np.uint16] = None) -> Image:
@@ -42,14 +43,15 @@ def visualize_heatmap(heatmap: NDArray[(Any, Any, 1), np.float], markers: NDArra
 
 
 class Context:
-    def __init__(self,*, output_folder: str, images_folder: str, scanpath_folder: str, fixations_folder: str,
-                 output_image_size: Tuple[int, int], fixation_sigma: float):
+    def __init__(self, *, output_folder: str, images_folder: str, scanpath_folder: str, fixations_folder: str,
+                 target_input_size: Tuple[int, int], target_ground_truth_size: Tuple[int, int], fixation_sigma: float):
         self.output_folder = output_folder
         self.images_folder = images_folder
         self.scanpath_folder = scanpath_folder
         self.fixations_folder = fixations_folder
 
-        self.output_image_size = output_image_size
+        self.target_input_size = target_input_size
+        self.target_ground_truth_size = target_ground_truth_size
         self.fixation_sigma = fixation_sigma
 
 
@@ -61,25 +63,26 @@ def process_entry(entry: datasets.InputData, ctx: Context):
 
     os.makedirs(os.path.join(ctx.images_folder, entry_folder), exist_ok=True)
 
-    entry_augmented = adjust_size(entry, ctx.output_image_size)
+    entry_augmented = augment_entry(entry, ctx.target_input_size, ctx.target_ground_truth_size, merge_radius=60)
     img_data = to_grayscale(entry_augmented.image_data)
 
     image_file_name = os.path.join(ctx.images_folder, entry_folder, entry_filename + '.jpg')
     img = Image.fromarray(img_data).convert('L')
     img.save(image_file_name)
 
-    partial_entry_index = []    # type: List[Tuple[str, str, str]]
+    partial_entry_index = []    # type: List[Tuple[str, str, str, str]]
 
-    for sp_i, sp in enumerate(entry_augmented.scanpaths):
-        sp_merged = merge_close_fixations(sp, radius=20)
+    os.makedirs(os.path.join(ctx.scanpath_folder, entry_folder), exist_ok=True)
 
-        for f_i in range(sp_merged.shape[0]-1):
+    data_index = 0
+    for sp_i, ((obs, sp), (gt_obs, gt_sp)) in enumerate(zip(entry_augmented.scanpaths, entry_augmented.gt_scanpaths)):
+        assert obs == gt_obs
 
-            #input_tensor = generate_input_tensor_grayscale(entry_augmented.image_data, sp_merged, f_i, fixation_sigma)
+        for f_i in range(sp.shape[0]-1):
 
-            scanpath_heatmap = convert_to_bytes(generate_scanpath_heatmap(sp_merged, f_i, ctx.output_image_size, ctx.fixation_sigma))
-            target_fixation_heatmap = convert_to_bytes(generate_single_fixation_heatmap(sp_merged[f_i+1], ctx.output_image_size, ctx.fixation_sigma))
-
+            scanpath_heatmap = convert_to_bytes(generate_scanpath_heatmap(sp, f_i, ctx.target_input_size, ctx.fixation_sigma))
+            target_fixation_heatmap = convert_to_bytes(generate_single_fixation_heatmap(gt_sp[f_i+1], ctx.target_ground_truth_size, ctx.fixation_sigma))
+            
             os.makedirs(os.path.join(ctx.scanpath_folder, entry_folder, entry_filename), exist_ok=True)
             scanpath_file_name = os.path.join(ctx.scanpath_folder, entry_folder, entry_filename, '%d_%d.jpg' % (sp_i, f_i))
             img = Image.fromarray(scanpath_heatmap).convert('L')
@@ -94,8 +97,9 @@ def process_entry(entry: datasets.InputData, ctx: Context):
             scanpath_file_index = os.path.relpath(scanpath_file_name, ctx.output_folder)
             fixation_file_index = os.path.relpath(fixation_file_name, ctx.output_folder)
 
-            partial_entry_index.append((image_file_index, scanpath_file_index, fixation_file_index))
+            partial_entry_index.append((image_file_index, scanpath_file_index, fixation_file_index, obs))
 
+    #print('Generated %d entries for  %s' % (len(partial_entry_index), entry.name), flush=True)
     return partial_entry_index
 
 
@@ -114,9 +118,24 @@ def main():
                         action='store',
                         default=1,
                         help='Number of worker for training')
+    parser.add_argument('--input_size',
+                        type=int,
+                        nargs=2,
+                        action='store',
+                        default=(128, 160),
+                        help='Size of the input images')
+    parser.add_argument('--ground_truth_size',
+                        type=int,
+                        nargs=2,
+                        action='store',
+                        default=(32, 48),
+                        help='Size of the ouput images')
+    parser.add_argument('--dataset',
+                        action='store',
+                        default='Cat2000',
+                        help='Name of teh dataset module')
 
     args = parser.parse_args()
-
 
     dataset_root = args.dataset_root
 
@@ -124,14 +143,20 @@ def main():
     if output_root is None:
         output_root = os.path.join(datasets.root_folder, 'ProcessedDatasets')
 
-    print('dataset_root: '+(dataset_root if dataset_root else 'None'))
-    print('output_root: '+output_root)
+    print('dataset_root: %s ' % (os.path.abspath(dataset_root) if dataset_root else 'None'))
+    print('output_root: %s ' % os.path.abspath(output_root))
     print('parallel_entries: %d' % args.parallel_entries)
+    print('dataset: %s' % args.dataset.lower())
 
-    dataset = salicon
+    try:
+        dataset = importlib.import_module(datasets.__name__ + '.' + args.dataset.lower())
+    except ImportError:
+        print('Could not find dataset %s (%s)' % (args.dataset, datasets.__name__ + '.' + args.dataset.lower()))
+        exit(-1)
 
-    output_image_size = (128, 160)
-    #output_image_size = (480, 640)
+    target_input_size = tuple(args.input_size)
+    target_ground_truth_size = tuple(args.ground_truth_size)
+
     fixation_sigma = 2.5
 
     one_file_per_entry = True
@@ -171,14 +196,15 @@ def main():
     #    shutil.rmtree(scanpath_viz_folder)
     #os.makedirs(scanpath_viz_folder, exist_ok=True)
 
-    entry_index = []  # type: List[Tuple[str, str, str]]
+    entry_index = []  # type: List[Tuple[str, str, str, str, str]]
 
     print('Loading dataset', flush=True)
     data = dataset.load_data(randomize=False, datasets_root=dataset_root)
 
     ctx = Context(
         fixation_sigma=fixation_sigma,
-        output_image_size=output_image_size,
+        target_input_size=target_input_size,
+        target_ground_truth_size=target_ground_truth_size,
 
         output_folder=output_folder,
         images_folder=images_folder,
@@ -194,11 +220,21 @@ def main():
 
         return completed, len(entry_index_futures)-completed
 
+    '''
+    for entry in data:
+        if entry.name != 'Action/097':
+            continue
+        res = process_entry(entry, ctx)
+        break
+    '''
+
     with ThreadPoolExecutor() as executor:
-        entry_index_futures = []        # type: List[Future[List[Tuple[str, str, str]]]]
+        entry_index_futures = []        # type: List[Future[List[Tuple[str, str, str, str]]]]
         completed, not_completed = count_futures(entry_index_futures)
 
         for entry in data:
+            #entry_index.append(process_entry(entry, ctx))
+
 
             partial_index_future = executor.submit(process_entry, entry, ctx)
             entry_index_futures.append(partial_index_future)

@@ -7,11 +7,17 @@ __status__ = "Prototype"
 
 from typing import Optional
 
+import numpy as np
 from keras import Model, Sequential, layers, backend
 from keras.applications import keras_modules_injection
 from keras.applications.resnet import ResNet50
-from keras.layers import Deconvolution2D, Conv2DTranspose
-from keras_applications.resnet_common import stack1, ResNet
+from keras.engine import Layer
+import keras.backend as K
+from keras.layers import Deconvolution2D, Conv2DTranspose, Conv2D, BatchNormalization, Activation, Flatten, Softmax, \
+    DepthwiseConv2D
+from keras_applications.resnet_common import ResNet
+from scipy.ndimage import gaussian_filter
+from tensorflow_core.python import reduce_max, reduce_min
 
 
 def block0(x, filters, kernel_size=3, stride=1,
@@ -84,7 +90,7 @@ def ResNet18(include_top=True,
              classes=1000,
              **kwargs):
     def stack_fn(x):
-        x = stack0(x, 64, 2, stride1=1, name='conv2')
+        x = stack0(x, 64, 2, stride1=2, name='conv2')
         x = stack0(x, 128, 2, name='conv3')
         x = stack0(x, 256, 2, name='conv4')
         x = stack0(x, 512, 2, name='conv5')
@@ -106,7 +112,7 @@ def ResNet34(include_top=True,
               classes=1000,
               **kwargs):
     def stack_fn(x):
-        x = stack0(x, 64, 3, stride1=1, name='conv2')
+        x = stack0(x, 64, 3, stride1=2, name='conv2')
         x = stack0(x, 128, 4, name='conv3')
         x = stack0(x, 256, 6, name='conv4')
         x = stack0(x, 512, 3, name='conv5')
@@ -118,10 +124,41 @@ def ResNet34(include_top=True,
                   **kwargs)
 
 
-def baseline(*, grayscale: bool = True, input_shape = None) -> Model:
+class Softmax2D(Layer):
+    def __init__(self, name: str = None, **kwargs):
+        super().__init__(name=name, **kwargs)
+
+    def call(self, inputs, **kwargs):
+        x = inputs
+        shape = K.shape(inputs)
+
+        x = Flatten()(x)
+        x = Softmax()(x)
+        x = K.reshape(x, shape)
+        return x
+
+
+class RescaleToByte(Layer):
+    def __init__(self, name: str = None, **kwargs):
+        super().__init__(name=name, **kwargs)
+
+    def call(self, inputs, **kwargs):
+        x = inputs
+
+        max = reduce_max(x, axis=(1, 2), keepdims=True)
+        min = reduce_min(x, axis=(1, 2), keepdims=True)
+
+        diff = max - min + 1e-4
+
+        x = ((x - min) / diff) * 256
+
+        return x
+
+
+def baseline(*, input_shape = None) -> Model:
 
     if input_shape is None:
-        input_shape = (None, None, 2) if grayscale else (None, None, 4)
+        input_shape = (None, None, 2)
 
     model = Sequential()
     model.add(ResNet34(
@@ -154,14 +191,191 @@ def baseline(*, grayscale: bool = True, input_shape = None) -> Model:
         strides=2,
         padding='same',
     ))
-    model.add(Conv2DTranspose(
+    model.add(Conv2D(
         filters=1,
         kernel_size=3,
-        strides=2,
+        strides=1,
         padding='same',
     ))
 
     return model
 
 
+def baseline2(*, input_shape = None) -> Model:
 
+    if input_shape is None:
+        input_shape = (None, None, 2)
+
+    model = Sequential()
+    model.add(ResNet34(
+        include_top=False,
+        weights=None,
+        input_shape=input_shape
+    ))
+
+    model.add(Conv2DTranspose(
+        filters=512,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(
+        filters=256,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(
+        filters=128,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(
+        filters=64,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2D(
+        filters=1,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+    ))
+
+    return model
+
+
+def transfer(*, input_shape = None) -> Model:
+
+    if input_shape is None:
+        input_shape = (None, None, 3)
+
+    resnet = ResNet50(
+        include_top=False,
+        weights='imagenet',
+        input_shape=input_shape,
+
+    )   # type: Model
+    resnet.trainable = False
+
+    model = Sequential()
+    model.add(resnet)
+
+    model.add(Conv2DTranspose(
+        filters=512,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(Conv2DTranspose(
+        filters=128,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(Conv2DTranspose(
+        filters=32,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(Conv2D(
+        filters=1,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+    ))
+
+    return model
+
+
+def transfer2(*, input_shape = None) -> Model:
+
+    if input_shape is None:
+        input_shape = (None, None, 3)
+
+    resnet = ResNet50(
+        include_top=False,
+        weights='imagenet',
+        input_shape=input_shape,
+
+    )   # type: Model
+    resnet.trainable = False
+
+    model = Sequential()
+    model.add(resnet)
+
+    model.add(Conv2DTranspose(
+        filters=512,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(
+        filters=128,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(
+        filters=32,
+        kernel_size=3,
+        strides=2,
+        padding='same',
+    ))
+    model.add(BatchNormalization())
+    model.add(Activation('relu'))
+
+    model.add(Conv2D(
+        filters=1,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+    ))
+
+    return model
+
+
+def add_heatmap_layers(input_model: Sequential, fixation_sigma: float):
+    kernel_size = int(fixation_sigma*8) + 1
+
+    kernel_weights = np.zeros(shape=(kernel_size, kernel_size))
+    kernel_weights[int(fixation_sigma*4), int(fixation_sigma*4)] = 1
+    gaussian_filter(kernel_weights, sigma=fixation_sigma, output=kernel_weights)
+
+    kernel_weights.shape = (*kernel_weights.shape, 1, 1)
+
+    #kernel_weights = np.expand_dims(kernel_weights, axis=-1)    # Add one dim for channels (last)
+    #kernel_weights = np.expand_dims(kernel_weights, axis=0)     # Add one dim for batch size (first)
+
+
+    g_layer = DepthwiseConv2D(kernel_size,
+                              use_bias=False,
+                              padding='same',
+                              weights=[kernel_weights],
+                              trainable=False,
+                              name='heatmap_blur')
+
+    input_model.add(Softmax2D(name='heatmap_softmax'))
+    input_model.add(g_layer)
+    input_model.add(RescaleToByte(name='heatmap_rescale'))

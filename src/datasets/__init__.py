@@ -11,8 +11,9 @@ from typing import NamedTuple, Tuple, Any, List
 import numpy as np
 from nptyping import NDArray
 
-root_folder = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+root_folder = os.path.abspath(os.path.join(__file__, '..', '..', '..', '..', '..', '..'))
 datasets_folder = os.path.join(root_folder, 'Datasets')
+processed_datasets_folder = os.path.join(root_folder, 'ProcessedDatasets')
 
 FixationsType = NDArray[(Any, 2), np.uint16]
 
@@ -21,7 +22,8 @@ InputData = NamedTuple(
     [
         ('name', str),
         ('image_data', NDArray[(Any, Any, 3), np.uint8]),
-        ('scanpaths', List[NDArray[(Any, 2), np.uint16]]),
+        ('scanpaths', List[Tuple[str, NDArray[(Any, 2), np.uint16]]]),
+        ('gt_scanpaths', List[Tuple[str, NDArray[(Any, 2), np.uint16]]]),
     ])
 
 

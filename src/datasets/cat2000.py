@@ -75,11 +75,12 @@ def load_data(randomize: bool = True, datasets_root: str = None) -> Iterable[Inp
         fixations_list = fix_data['value']
 
         image = np.asarray(img_data)
-        scanpaths = [swap_columns(np.round(f[0, 0]['data']).astype(np.uint16)) for f in fixations_list[:, 0]]
+        scanpaths = [(str(f[0, 0]['name'][0]), swap_columns(np.round(f[0, 0]['data']).astype(np.uint16))) for f in fixations_list[:, 0]]
 
         yield InputData(
             name=name,
             image_data=image,
-            scanpaths=scanpaths
+            scanpaths=scanpaths,
+            gt_scanpaths=[]
         )
 

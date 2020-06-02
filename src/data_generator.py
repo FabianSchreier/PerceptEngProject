@@ -6,7 +6,10 @@ __version__ = "0.1.0"
 __status__ = "Prototype"
 
 import os
-from typing import List, Any, Dict, Tuple
+import tarfile
+from abc import ABC, abstractmethod
+from io import BytesIO
+from typing import List, Any, Dict, Tuple, BinaryIO, Union
 
 import h5py
 import numpy as np
@@ -15,6 +18,90 @@ from PIL import Image
 from keras.utils import Sequence
 from nptyping import NDArray
 from numpy.random._generator import default_rng
+
+
+class DataSource (ABC):
+    @property
+    @abstractmethod
+    def name(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get(self, file: str) -> BinaryIO:
+        raise NotImplementedError()
+
+    def read(self, file: str) -> bytes:
+        with self.get(file) as f:
+            return f.read()
+
+    def close(self):
+        pass
+
+    def load_files_index(self) -> NDArray[(Any, 3), np.str]:
+        array_file = BytesIO()
+        array_file.write(self.read('index.npy'))
+        array_file.seek(0)
+        index = np.load(array_file)
+
+        return index
+
+    def load_files_index_with_source_name(self) -> NDArray[(Any, 4), np.str]:
+        idx = self.load_files_index()
+
+        source_name_array = np.full(shape=(idx.shape[0], 1), dtype=idx.dtype, fill_value=self.name)
+
+        augm_idx = np.append(idx, source_name_array, axis=1)
+        return augm_idx
+
+
+class FolderDataSource(DataSource):
+
+    def __init__(self, folder: str):
+        self.folder = folder
+
+    @property
+    def name(self):
+        return os.path.basename(self.folder).lower()
+
+    def get(self, file: str) -> BinaryIO:
+        path = os.path.join(self.folder, file)
+        if not os.path.exists(path) or not os.path.isfile(path):
+            raise FileNotFoundError()
+        return open(path, 'rb')
+
+
+class Hdf5FolderDataSource(DataSource):
+    def __init__(self, folder: str):
+        self.folder = folder
+
+    @property
+    def name(self):
+        return os.path.basename(self.folder).lower()
+
+    def get(self, file: str) -> BinaryIO:
+        path = os.path.join(self.folder, file)
+        if not os.path.exists(path) or not os.path.isfile(path):
+            raise FileNotFoundError()
+        return open(path, 'rb')
+
+
+class TarArchiveDataSource(DataSource):
+    def __init__(self, archive_file: str, root_folder: str = ''):
+        self.archive_file = archive_file
+        self.archive = tarfile.open(archive_file, 'r:*')
+        self.root_folder = root_folder
+
+    @property
+    def name(self):
+        file,_ = os.path.splitext(os.path.basename(self.archive_file))
+        return file.lower()
+
+    def get(self, file: str) -> BinaryIO:
+        f = self.archive.extractfile(os.path.join(self.root_folder, file))
+        return f
+
+    def close(self):
+        self.archive.close()
 
 
 def select_subset(input: NDArray, *, num: int = None, ratio: float = None) -> Tuple[NDArray, NDArray]:
@@ -32,7 +119,7 @@ def select_subset(input: NDArray, *, num: int = None, ratio: float = None) -> Tu
 
     rng = default_rng()
 
-    sub_set_indx =  np.sort(rng.choice(input_indx, size=sub_set_size, replace=False))
+    sub_set_indx = np.sort(rng.choice(input_indx, size=sub_set_size, replace=False))
     assert len(sub_set_indx) == sub_set_size
 
     remaining_set_indx = np.delete(input_indx, sub_set_indx)
@@ -44,33 +131,35 @@ def select_subset(input: NDArray, *, num: int = None, ratio: float = None) -> Tu
     return sub_set, remaining_set
 
 
-def load_files_index(folder: str) -> NDArray[(Any, 3), np.str]:
-    index_file_name = os.path.join(folder, 'index.npy')
-    if not os.path.exists(index_file_name) or not os.path.isfile(index_file_name):
-        raise FileNotFoundError()
-    index = np.load(index_file_name)
-    return index
-
-
-def load_images(file_entries, image_size, folder, X=None, y=None):
+def load_images(file_entries, input_size, ground_truth_size, sources: Union[DataSource, Dict[str, DataSource]], X=None, y=None, third_channel: str = None):
     # Initialization
-    print('Loading data batch of size %d' % file_entries.shape[0], flush=True)
+    print('Loading data batch of size %d with input size %s and output size %s' % (file_entries.shape[0], input_size, ground_truth_size), flush=True)
+
+    if not isinstance(sources, dict):
+        sources = {sources.name: sources}
 
     if X is None:
         # noinspection PyTypeChecker
-        X = np.empty((file_entries.shape[0], *image_size, 2),
-                       dtype=np.float)  # type: NDArray[(Any, Any, Any, 2), np.uint8]
+        X = np.zeros((file_entries.shape[0], *input_size, 2 if third_channel is None else 3),
+                     dtype=np.uint8)  # type: NDArray[(Any, Any, Any, 2), np.uint8]
     if y is None:
         # noinspection PyTypeChecker
-        y = np.empty((file_entries.shape[0], *image_size, 1),
-                       dtype=np.float)  # type: NDArray[(Any, Any, Any, 1), np.uint8]
+        y = np.zeros((file_entries.shape[0], *ground_truth_size, 1),
+                     dtype=np.uint8)  # type: NDArray[(Any, Any, Any, 1), np.uint8]
 
     # Generate data
-    for i, (image_file_name, scanpath_file_name, fixation_file_name) in enumerate(file_entries):
+    for i, tpl in enumerate(file_entries):
+        if len(tpl) > 3:
+            (image_file_name, scanpath_file_name, fixation_file_name, obs_id, source_name) = tpl
+        else:
+            (image_file_name, scanpath_file_name, fixation_file_name, obs_id) = tpl
+            source_name = next(iter(sources.keys()))    # type: str
 
-        image_file = Image.open(os.path.join(folder, image_file_name))
-        scanpath_file = Image.open(os.path.join(folder, scanpath_file_name))
-        fixation_file = Image.open(os.path.join(folder, fixation_file_name))
+        source = sources[source_name]
+
+        image_file = Image.open(source.get(image_file_name))
+        scanpath_file = Image.open(source.get(scanpath_file_name))
+        fixation_file = Image.open(source.get(fixation_file_name))
 
         # noinspection PyTypeChecker
         img_data = np.asarray(image_file)           # type: NDArray[(Any, Any), np.uint8]
@@ -80,53 +169,50 @@ def load_images(file_entries, image_size, folder, X=None, y=None):
         target_heatmap = np.asarray(fixation_file)     # type: NDArray[(Any, Any), np.uint8]
 
         assert len(img_data.shape) == 2
-        assert img_data.shape == image_size
+        assert img_data.shape == input_size
         assert len(scanpath_heatmap.shape) == 2
-        assert scanpath_heatmap.shape == image_size
+        assert scanpath_heatmap.shape == input_size
         assert len(target_heatmap.shape) == 2
-        assert target_heatmap.shape == image_size
+        assert target_heatmap.shape == ground_truth_size
 
         # Store sample
         X[i,:,:,0] = img_data
         X[i,:,:,1] = scanpath_heatmap
+        if third_channel == 'image':
+            X[i,:,:,2] = img_data
+        elif third_channel == 'fixation':
+            X[i,:,:,2] = scanpath_heatmap
 
         # Store class
-        y[i,:,:,-1] = target_heatmap
+        y[i,:,:,0] = target_heatmap
 
     return X, y
 
 
 class AugmentedDataFolderGenerator(Sequence):
-    def __init__(self, files_index: NDArray[(Any, 3), np.str], folder: str, batch_size: int = 32, image_size= (480, 640), grayscale: bool = True, shuffle: bool = True):
-        self.folder = folder
+    def __init__(self, files_index: NDArray[(Any, 3), np.str], source: DataSource, batch_size: int = 32, input_size=(480, 640), ground_truth_size=(480, 640), grayscale: bool = True, shuffle: bool = True):
+        self.source = source
         self.batch_size = batch_size
-        self.image_size = image_size
+        self.input_size = input_size
+        self.ground_truth_size = ground_truth_size
         self.grayscale = grayscale
         self.shuffle = shuffle
 
-        self._files = files_index
+        self._files_index = files_index
 
-        self._images = self.__data_generation(self._files)
-
+        self._order_indices = np.arange(0, self._files_index.shape[0])
+        self._input, self._ground_truth = load_images(self._files_index, self.input_size, self.ground_truth_size, self.source)
 
         self.on_epoch_end()
 
-
     def on_epoch_end(self):
         if self.shuffle:
-            np.random.shuffle(self._images)
-
-    def __data_generation(self, file_entries) -> NDArray[(Any, Any, Any, 3), np.uint8]:
-        # noinspection PyTypeChecker
-        res = np.empty((file_entries.shape[0], *self.image_size, 3), dtype=np.float)  # type: NDArray[(Any, Any, Any, 3), np.uint8]
-
-        load_images(file_entries, self.image_size, self.folder, res[:, :, :, 0:2], res[:, :, :, 2])
-
-        return res
+            np.random.shuffle(self._order_indices)
 
     def __get(self, index_slice):
-        X = self._images[index_slice, :, :, 0:2]
-        y = self._images[index_slice, :, :, -1]
+        indices = self._order_indices[index_slice]
+        X = self._input[indices, :, :, 0:2]
+        y = self._ground_truth[indices, :, :, -1]
         y.shape = (*y.shape, 1)     # Add extra dim (so the Conv output layer is happy)
         return X, y
 
@@ -152,4 +238,4 @@ class AugmentedDataFolderGenerator(Sequence):
         return X, y
 
     def __len__(self):
-        return int(np.floor(len(self._files) / self.batch_size))
+        return int(np.floor(len(self._files_index) / self.batch_size))
